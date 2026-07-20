@@ -601,6 +601,7 @@ class SupportBot:
         self.open_tickets.add(ticket_id)
         self.save_data()
         
+        # Получаем ответ от AI
         ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, description)
         
         if ai_response:
@@ -614,38 +615,46 @@ class SupportBot:
             ticket_data['last_activity'] = datetime.now().isoformat()
             self.save_data()
         
+        # Создаем клавиатуру
         keyboard = [
             [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
             [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
         ]
         
-        if ticket_data['ai_response_count'] >= 2:
-            keyboard.insert(0, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
-        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if ai_response:
+        # Отправляем ответ пользователю
+        try:
+            if ai_response:
+                await update.message.reply_text(
+                    f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
+                    f"🤖 <b>AI-помощник:</b>\n\n{html.escape(ai_response)}",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            else:
+                ticket_data['waiting_for_operator'] = True
+                ticket_data['ai_processed'] = False
+                self.save_data()
+                
+                await update.message.reply_text(
+                    f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
+                    f"⏳ <b>ИИ временно недоступен</b>\n"
+                    f"Мы передали ваш запрос оператору.",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                
+                await self.notify_admin_about_ticket(ticket_id)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения о создании тикета: {e}")
+            # Пробуем отправить простое сообщение
             await update.message.reply_text(
-                f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
-                f"🤖 <b>AI-помощник:</b>\n\n{html.escape(ai_response)}",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+                f"✅ <b>Тикет создан!</b> <code>{ticket_id}</code>",
+                parse_mode='HTML'
             )
-        else:
-            ticket_data['waiting_for_operator'] = True
-            ticket_data['ai_processed'] = False
-            self.save_data()
-            
-            await update.message.reply_text(
-                f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
-                f"⏳ <b>ИИ временно недоступен</b>\n"
-                f"Мы передали ваш запрос оператору.",
-                parse_mode='HTML',
-                reply_markup=reply_markup
-            )
-            
-            await self.notify_admin_about_ticket(ticket_id)
         
+        # Очищаем данные и завершаем диалог
         context.user_data.pop('ticket_subject', None)
         return ConversationHandler.END
 
