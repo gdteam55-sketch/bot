@@ -125,14 +125,13 @@ class SupportBot:
         # Обработчик для автоматического /start
         self.app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.welcome_new_user))
         
-        # Добавляем обработчик ошибок - НЕ ПОКАЗЫВАЕМ ОШИБКИ ПОЛЬЗОВАТЕЛЮ
+        # Добавляем обработчик ошибок - просто логируем
         self.app.add_error_handler(self.error_handler)
 
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обрабатывает ошибки бота - логируем, но не показываем пользователю"""
+        """Обрабатывает ошибки бота - только логируем"""
         error = context.error
         logger.error(f"Ошибка в боте: {error}", exc_info=error)
-        # НЕ отправляем сообщение об ошибке пользователю
         return
 
     async def welcome_new_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -631,12 +630,7 @@ class SupportBot:
             self.save_data()
             
             # Получаем ответ от AI
-            try:
-                ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, description)
-            except Exception as e:
-                logger.error(f"Ошибка при запросе к AI: {e}")
-                ai_response = None
-                wants_operator = True
+            ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, description)
             
             if ai_response:
                 ticket_data['messages'].append({
@@ -682,8 +676,12 @@ class SupportBot:
                 
         except Exception as e:
             logger.error(f"Ошибка в get_ticket_description: {e}")
+            # Пытаемся отправить хотя бы базовое сообщение
             try:
-                await update.message.reply_text(f"✅ <b>Тикет создан!</b>")
+                await update.message.reply_text(
+                    f"✅ <b>Тикет создан!</b>",
+                    parse_mode='HTML'
+                )
             except:
                 pass
         
