@@ -109,6 +109,7 @@ class SupportBot:
                 TICKET_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_ticket_description)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
+            allow_reentry=True
         )
         self.app.add_handler(conv_handler)
         
@@ -492,17 +493,25 @@ class SupportBot:
 
     async def create_ticket(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('ticket_subject', None)
+        context.user_data.pop('ticket_description', None)
         
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            await query.message.reply_text(
-                "🎫 <b>Создание нового тикета</b>\n\n📋 <b>Введите заголовок тикета:</b>",
-                parse_mode='HTML'
-            )
-        else:
+        try:
+            if update.callback_query:
+                query = update.callback_query
+                await query.answer()
+                await query.message.reply_text(
+                    "🎫 <b>Создание нового тикета</b>\n\n📋 <b>Введите заголовок тикета:</b>",
+                    parse_mode='HTML'
+                )
+            else:
+                await update.message.reply_text(
+                    "🎫 <b>Создание нового тикета</b>\n\n📋 <b>Введите заголовок тикета:</b>",
+                    parse_mode='HTML'
+                )
+        except Exception as e:
+            logger.error(f"Ошибка в create_ticket: {e}")
             await update.message.reply_text(
-                "🎫 <b>Создание нового тикета</b>\n\n📋 <b>Введите заголовок тикета:</b>",
+                "🎫 <b>Создание нового тикета</b>\n\n📋 Введите заголовок тикета:",
                 parse_mode='HTML'
             )
         
@@ -511,6 +520,8 @@ class SupportBot:
     async def get_ticket_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         subject = update.message.text
+        
+        logger.info(f"Получен заголовок от {user.id}: {subject}")
         
         spam_attempts = self.user_spam_attempts.get(user.id, 0)
         
@@ -538,18 +549,30 @@ class SupportBot:
         self.save_data()
         
         context.user_data['ticket_subject'] = subject
-        await update.message.reply_text(
-            "📝 <b>Теперь опишите проблему подробно:</b>\n\n"
-            "• <b>Что произошло?</b>\n"
-            "• <b>Когда это случилось?</b>\n"
-            "• <b>Все детали</b>",
-            parse_mode='HTML'
-        )
+        
+        try:
+            await update.message.reply_text(
+                "📝 <b>Теперь опишите проблему подробно:</b>\n\n"
+                "• <b>Что произошло?</b>\n"
+                "• <b>Когда это случилось?</b>\n"
+                "• <b>Все детали</b>\n\n"
+                "<i>Напишите описание:</i>",
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке запроса описания: {e}")
+            await update.message.reply_text(
+                "📝 Теперь опишите проблему подробно:",
+                parse_mode='HTML'
+            )
+        
         return TICKET_DESCRIPTION
 
     async def get_ticket_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         description = update.message.text
+        
+        logger.info(f"Получено описание от {user.id}: {description[:50]}...")
         
         spam_attempts = self.user_spam_attempts.get(user.id, 0)
         
@@ -602,7 +625,12 @@ class SupportBot:
         self.save_data()
         
         # Получаем ответ от AI
-        ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, description)
+        try:
+            ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, description)
+        except Exception as e:
+            logger.error(f"Ошибка при запросе к AI: {e}")
+            ai_response = None
+            wants_operator = True
         
         if ai_response:
             ticket_data['messages'].append({
@@ -649,13 +677,17 @@ class SupportBot:
         except Exception as e:
             logger.error(f"Ошибка при отправке сообщения о создании тикета: {e}")
             # Пробуем отправить простое сообщение
-            await update.message.reply_text(
-                f"✅ <b>Тикет создан!</b> <code>{ticket_id}</code>",
-                parse_mode='HTML'
-            )
+            try:
+                await update.message.reply_text(
+                    f"✅ <b>Тикет создан!</b> <code>{ticket_id}</code>",
+                    parse_mode='HTML'
+                )
+            except Exception as e2:
+                logger.error(f"Критическая ошибка при отправке: {e2}")
         
         # Очищаем данные и завершаем диалог
         context.user_data.pop('ticket_subject', None)
+        context.user_data.pop('ticket_description', None)
         return ConversationHandler.END
 
     async def notify_admin_about_ticket(self, ticket_id):
@@ -1109,6 +1141,13 @@ class SupportBot:
         """Единый обработчик для всех сообщений"""
         user_id = update.effective_user.id
         user_message = update.message.text
+        
+        logger.info(f"Получено сообщение от {user_id}: {user_message[:50]}...")
+        
+        # Проверяем, не находится ли пользователь в диалоге создания тикета
+        if context.user_data.get('ticket_subject') is not None:
+            # Это уже обрабатывается в ConversationHandler
+            return
         
         # Если это админ и он отвечает на тикет
         if user_id == ADMIN_ID and 'admin_replying_to' in context.user_data:
