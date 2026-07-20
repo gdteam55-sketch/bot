@@ -116,11 +116,11 @@ class SupportBot:
         # Обработчики callback
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
         
-        # ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ - для всех пользователей
+        # Обработчик для обычных сообщений (с проверкой, что не в диалоге)
         self.app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             self.handle_all_messages
-        ))
+        ), group=1)  # Более низкий приоритет
         
         # Обработчик для автоматического /start
         self.app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.welcome_new_user))
@@ -130,11 +130,14 @@ class SupportBot:
 
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает ошибки бота"""
-        logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+        error = context.error
+        logger.error(f"Ошибка: {error}", exc_info=error)
         
-        if "Message is not modified" in str(context.error):
+        if "Message is not modified" in str(error):
             return
-        if "message to edit" in str(context.error) or "message is not found" in str(context.error):
+        if "message to edit" in str(error) or "message is not found" in str(error):
+            return
+        if "Conflict" in str(error) or "409" in str(error):
             return
             
         try:
@@ -511,8 +514,7 @@ class SupportBot:
         except Exception as e:
             logger.error(f"Ошибка в create_ticket: {e}")
             await update.message.reply_text(
-                "🎫 <b>Создание нового тикета</b>\n\n📋 Введите заголовок тикета:",
-                parse_mode='HTML'
+                "🎫 Создание нового тикета\n\nВведите заголовок тикета:"
             )
         
         return TICKET_SUBJECT
@@ -562,8 +564,7 @@ class SupportBot:
         except Exception as e:
             logger.error(f"Ошибка при отправке запроса описания: {e}")
             await update.message.reply_text(
-                "📝 Теперь опишите проблему подробно:",
-                parse_mode='HTML'
+                "📝 Теперь опишите проблему подробно:"
             )
         
         return TICKET_DESCRIPTION
@@ -676,7 +677,6 @@ class SupportBot:
                 await self.notify_admin_about_ticket(ticket_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке сообщения о создании тикета: {e}")
-            # Пробуем отправить простое сообщение
             try:
                 await update.message.reply_text(
                     f"✅ <b>Тикет создан!</b> <code>{ticket_id}</code>",
@@ -1139,15 +1139,15 @@ class SupportBot:
 
     async def handle_all_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Единый обработчик для всех сообщений"""
+        # ВАЖНО: Проверяем, не находится ли пользователь в диалоге создания тикета
+        if context.user_data.get('ticket_subject') is not None:
+            logger.info("Пользователь в диалоге создания тикета, пропускаем")
+            return
+        
         user_id = update.effective_user.id
         user_message = update.message.text
         
         logger.info(f"Получено сообщение от {user_id}: {user_message[:50]}...")
-        
-        # Проверяем, не находится ли пользователь в диалоге создания тикета
-        if context.user_data.get('ticket_subject') is not None:
-            # Это уже обрабатывается в ConversationHandler
-            return
         
         # Если это админ и он отвечает на тикет
         if user_id == ADMIN_ID and 'admin_replying_to' in context.user_data:
