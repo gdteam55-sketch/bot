@@ -487,7 +487,6 @@ class SupportBot:
             ai_responses = sum(1 for msg in ticket_data.get('messages', []) if msg.get('is_ai', False))
             if ai_responses >= 2:
                 keyboard.insert(0, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
-            keyboard.insert(0, [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -720,10 +719,10 @@ class SupportBot:
             'created_at': datetime.now().isoformat(),
             'messages': [],
             'content_checked': True,
-            'ai_processed': True,  # Все новые тикеты идут к AI сначала
+            'ai_processed': True,
             'last_activity': datetime.now().isoformat(),
             'waiting_for_operator': False,
-            'ai_response_count': 0  # Счетчик ответов AI
+            'ai_response_count': 0
         }
         
         # Сохраняем тикет
@@ -749,14 +748,13 @@ class SupportBot:
         
         # Отправляем сообщение пользователю с ответом ИИ
         keyboard = [
-            [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
             [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
             [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
         ]
         
         # Добавляем кнопку вызова оператора только после 2-х ответов AI
         if ticket_data['ai_response_count'] >= 2:
-            keyboard.insert(1, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
+            keyboard.insert(0, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -764,7 +762,7 @@ class SupportBot:
             await update.message.reply_text(
                 f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
                 f"🤖 <b>AI-помощник отвечает:</b>\n\n{html.escape(ai_response)}\n\n"
-                f"<i>Продолжайте диалог с AI. Просто пишите свои сообщения, не нужно нажимать кнопку "Ответить" каждый раз.</i>",
+                f"<i>Продолжайте диалог с AI. Просто пишите свои сообщения, не нужно нажимать кнопку \"Ответить\" каждый раз.</i>",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
@@ -963,26 +961,6 @@ class SupportBot:
             ticket_id = data.replace("user_call_operator_", "")
             await self.call_operator(query, ticket_id)
             
-        elif data.startswith("user_reply_"):
-            ticket_id = data.replace("user_reply_", "")
-            ticket_data = self.tickets.get(ticket_id)
-            if ticket_data and ticket_data.get('waiting_for_operator', False):
-                await query.edit_message_text(
-                    f"💬 <b>Ответ на тикет {ticket_id}</b>\n\n"
-                    f"📞 <b>Внимание!</b> Вы вызвали оператора.\n"
-                    f"Ваш ответ будет направлен оператору.\n\n"
-                    f"Введите ваш ответ:",
-                    parse_mode='HTML'
-                )
-            else:
-                await query.edit_message_text(
-                    f"💬 <b>Ответ на тикет {ticket_id}</b>\n\n"
-                    f"🤖 Вы общаетесь с AI-помощником.\n"
-                    f"Введите ваш ответ:",
-                    parse_mode='HTML'
-                )
-            context.user_data['user_replying_to'] = ticket_id
-            
         elif data.startswith("admin_view_"):
             ticket_id = data.replace("admin_view_", "")
             await self.show_ticket_to_admin(query, ticket_id)
@@ -1034,7 +1012,6 @@ class SupportBot:
         
         # Отправляем подтверждение пользователю
         keyboard = [
-            [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
             [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
             [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
         ]
@@ -1272,7 +1249,8 @@ class SupportBot:
     async def close_ticket(self, query, ticket_id, closed_by_ai=False, closed_by_timeout=False):
         ticket_data = self.tickets.get(ticket_id)
         if not ticket_data:
-            await query.edit_message_text("❌ Тикет не найден!")
+            if query:
+                await query.edit_message_text("❌ Тикет не найден!")
             return
             
         ticket_data['status'] = 'closed'
@@ -1304,7 +1282,8 @@ class SupportBot:
             
             close_message += "\n\nСпасибо за обращение!"
             
-            await query.bot.send_message(
+            # Отправляем сообщение пользователю
+            await self.app.bot.send_message(
                 chat_id=ticket_data['user_id'],
                 text=close_message,
                 parse_mode='HTML',
@@ -1362,9 +1341,7 @@ class SupportBot:
         user_id = update.effective_user.id
         user_message = update.message.text
         
-        # Проверяем, есть ли у пользователя активный диалог
-        # Если пользователь уже в диалоге с ботом, продолжаем его
-        # Ищем открытый тикет пользователя, с которым ведется диалог
+        # Ищем открытый тикет пользователя
         active_ticket_id = None
         if user_id in self.user_tickets:
             for ticket_id in reversed(self.user_tickets[user_id]):
@@ -1373,7 +1350,7 @@ class SupportBot:
                     active_ticket_id = ticket_id
                     break
         
-        # Если есть активный тикет и он не ожидает оператора, продолжаем диалог
+        # Если есть активный тикет
         if active_ticket_id:
             ticket_data = self.tickets.get(active_ticket_id)
             
@@ -1464,7 +1441,6 @@ class SupportBot:
                 await self.notify_admin_about_ticket(ticket_id)
                 
                 keyboard = [
-                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
                     [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
                     [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
                 ]
@@ -1517,7 +1493,6 @@ class SupportBot:
                 await self.notify_admin_about_ticket(ticket_id)
                 
                 keyboard = [
-                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
                     [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
                     [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
                 ]
