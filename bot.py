@@ -44,6 +44,8 @@ class SupportBot:
         # Запускаем задачу для проверки неактивных диалогов
         self.cleanup_task = None
         self.ai_timeout_task = None
+        # Словарь для отслеживания активных диалогов с пользователями
+        self.active_conversations = {}
 
     def load_data(self):
         """Загружает данные из файлов"""
@@ -130,13 +132,13 @@ class SupportBot:
         # Обработчики callback
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
         
-        # Обработчик сообщений - ДОБАВЛЯЕМ ФИЛЬТР, ЧТОБЫ ИГНОРИРОВАТЬ АДМИНА
+        # Обработчик сообщений для пользователей
         self.app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & ~filters.User(user_id=ADMIN_ID), 
             self.handle_user_message
         ))
         
-        # Обработчик для сообщений от админа (отдельный)
+        # Обработчик для сообщений от админа
         self.app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_ID),
             self.handle_admin_message
@@ -242,7 +244,7 @@ class SupportBot:
             
         return False
 
-    async def ask_ai_for_help(self, ticket_id: str, user_message: str = None) -> tuple:
+    async def ask_ai_for_help(self, ticket_id: str, user_message: str = None, is_followup: bool = False) -> tuple:
         """
         Запрашивает у ИИ ответ на сообщение в тикете.
         Возвращает (ответ_ии, флаг_эскалации_оператору, нужно_ли_задать_вопрос)
@@ -481,7 +483,9 @@ class SupportBot:
         ]
         
         if ticket_data['status'] == 'open':
-            if ticket_data.get('ai_processed', False):
+            # Показываем кнопку вызова оператора только если было хотя бы 2 ответа AI
+            ai_responses = sum(1 for msg in ticket_data.get('messages', []) if msg.get('is_ai', False))
+            if ai_responses >= 2:
                 keyboard.insert(0, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
             keyboard.insert(0, [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")])
         
@@ -514,15 +518,13 @@ class SupportBot:
 🤖 <b>Работа с ИИ-помощником:</b>
 • ИИ будет общаться с вами в диалоге
 • Задавайте вопросы - ИИ поможет найти решение
-• Если ИИ не справляется, нажмите "Позвать оператора"
+• После 2-х ответов ИИ появится кнопка "Позвать оператора"
 
 📞 <b>Вызов оператора:</b>
 Если ИИ не может помочь, вы всегда можете вызвать оператора.
 
 ✅ <b>Закрытие тикета:</b>
-Тикет закроется автоматически, если:
-• Вы подтвердите решение проблемы
-• Не будет активности 5 минут
+Тикет закроется автоматически через 24 часа без активности.
 
 📋 <b>Просмотр истории:</b>
 Используйте команду /mytickets для просмотра всех ваших тикетов
@@ -720,7 +722,8 @@ class SupportBot:
             'content_checked': True,
             'ai_processed': True,  # Все новые тикеты идут к AI сначала
             'last_activity': datetime.now().isoformat(),
-            'waiting_for_operator': False
+            'waiting_for_operator': False,
+            'ai_response_count': 0  # Счетчик ответов AI
         }
         
         # Сохраняем тикет
@@ -740,23 +743,28 @@ class SupportBot:
                 'timestamp': datetime.now().isoformat(),
                 'is_ai': True
             })
+            ticket_data['ai_response_count'] = 1
             ticket_data['last_activity'] = datetime.now().isoformat()
             self.save_data()
         
         # Отправляем сообщение пользователю с ответом ИИ
         keyboard = [
             [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-            [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")],
             [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
             [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
         ]
+        
+        # Добавляем кнопку вызова оператора только после 2-х ответов AI
+        if ticket_data['ai_response_count'] >= 2:
+            keyboard.insert(1, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         if ai_response:
             await update.message.reply_text(
                 f"🎫 <b>Тикет создан!</b> <code>{ticket_id}</code>\n\n"
                 f"🤖 <b>AI-помощник отвечает:</b>\n\n{html.escape(ai_response)}\n\n"
-                f"<i>Продолжайте диалог с AI. Если нужна помощь оператора - нажмите кнопку ниже.</i>",
+                f"<i>Продолжайте диалог с AI. Просто пишите свои сообщения, не нужно нажимать кнопку "Ответить" каждый раз.</i>",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
@@ -1261,7 +1269,7 @@ class SupportBot:
             if "Message is not modified" not in str(e):
                 raise e
 
-    async def close_ticket(self, query, ticket_id, closed_by_ai=False):
+    async def close_ticket(self, query, ticket_id, closed_by_ai=False, closed_by_timeout=False):
         ticket_data = self.tickets.get(ticket_id)
         if not ticket_data:
             await query.edit_message_text("❌ Тикет не найден!")
@@ -1282,8 +1290,18 @@ class SupportBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             close_message = f"✅ <b>Тикет закрыт</b>\n\nВаш тикет <code>{ticket_id}</code> был закрыт."
+            
             if closed_by_ai:
                 close_message += "\n\n🤖 Проблема была решена с помощью AI-помощника."
+            elif closed_by_timeout:
+                close_message += "\n\n⏰ Тикет был автоматически закрыт из-за отсутствия активности в течение 24 часов."
+            
+            # Добавляем последний ответ, если есть
+            if ticket_data.get('messages'):
+                last_message = ticket_data['messages'][-1]
+                if not last_message.get('is_ai', False) and not last_message['from_user']:
+                    close_message += f"\n\n📝 <b>Последний ответ поддержки:</b>\n{html.escape(last_message['text'])}"
+            
             close_message += "\n\nСпасибо за обращение!"
             
             await query.bot.send_message(
@@ -1295,68 +1313,46 @@ class SupportBot:
         except Exception as e:
             logger.error(f"Не удалось уведомить пользователя: {e}")
         
-        keyboard = [
-            [InlineKeyboardButton("📊 Панель админа", callback_data="admin_panel")],
-            [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"✅ <b>Тикет закрыт!</b>\n\n<code>{ticket_id}</code>",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+        if query:
+            keyboard = [
+                [InlineKeyboardButton("📊 Панель админа", callback_data="admin_panel")],
+                [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            try:
+                await query.edit_message_text(
+                    f"✅ <b>Тикет закрыт!</b>\n\n<code>{ticket_id}</code>",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании сообщения: {e}")
 
     async def check_inactive_ai_conversations(self):
-        """Проверяет неактивные AI-диалоги и закрывает их"""
+        """Проверяет неактивные AI-диалоги и закрывает их через 24 часа"""
         while True:
             try:
-                await asyncio.sleep(60)  # Проверяем каждую минуту
+                await asyncio.sleep(3600)  # Проверяем каждый час
                 
                 now = datetime.now()
-                timeout_minutes = 5
+                timeout_hours = 24  # 24 часа
                 
                 for ticket_id, ticket_data in list(self.tickets.items()):
                     if ticket_data['status'] != 'open':
-                        continue
-                    
-                    if not ticket_data.get('ai_processed', False):
                         continue
                     
                     if ticket_data.get('waiting_for_operator', False):
                         continue
                     
                     last_activity = datetime.fromisoformat(ticket_data.get('last_activity', ticket_data['created_at']))
-                    time_diff = (now - last_activity).total_seconds() / 60
+                    time_diff = (now - last_activity).total_seconds() / 3600  # В часах
                     
-                    if time_diff >= timeout_minutes:
+                    if time_diff >= timeout_hours:
                         # Закрываем тикет автоматически
-                        logger.info(f"Автоматическое закрытие тикета {ticket_id} из-за неактивности ({time_diff:.1f} минут)")
+                        logger.info(f"Автоматическое закрытие тикета {ticket_id} из-за неактивности ({time_diff:.1f} часов)")
                         
-                        ticket_data['status'] = 'closed'
-                        if ticket_id in self.open_tickets:
-                            self.open_tickets.remove(ticket_id)
-                        self.save_data()
-                        
-                        # Уведомляем пользователя
-                        try:
-                            keyboard = [
-                                [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
-                                [InlineKeyboardButton("🎫 Новый тикет", callback_data="create_ticket")],
-                                [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
-                            ]
-                            reply_markup = InlineKeyboardMarkup(keyboard)
-                            
-                            await self.app.bot.send_message(
-                                chat_id=ticket_data['user_id'],
-                                text=f"⏰ <b>Тикет автоматически закрыт</b>\n\n"
-                                     f"Тикет <code>{ticket_id}</code> был закрыт из-за отсутствия активности в течение 5 минут.\n\n"
-                                     f"Если проблема осталась, создайте новый тикет.",
-                                parse_mode='HTML',
-                                reply_markup=reply_markup
-                            )
-                        except Exception as e:
-                            logger.error(f"Не удалось уведомить пользователя о закрытии: {e}")
+                        await self.close_ticket(None, ticket_id, closed_by_timeout=True)
                         
             except Exception as e:
                 logger.error(f"Ошибка в проверке неактивных диалогов: {e}")
@@ -1364,49 +1360,47 @@ class SupportBot:
     async def handle_user_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает сообщения от обычных пользователей (не админа)"""
         user_id = update.effective_user.id
+        user_message = update.message.text
         
-        # Если пользователь отвечает на тикет
-        if 'user_replying_to' in context.user_data:
-            ticket_id = context.user_data['user_replying_to']
-            ticket_data = self.tickets.get(ticket_id)
+        # Проверяем, есть ли у пользователя активный диалог
+        # Если пользователь уже в диалоге с ботом, продолжаем его
+        # Ищем открытый тикет пользователя, с которым ведется диалог
+        active_ticket_id = None
+        if user_id in self.user_tickets:
+            for ticket_id in reversed(self.user_tickets[user_id]):
+                ticket = self.tickets.get(ticket_id)
+                if ticket and ticket['status'] == 'open':
+                    active_ticket_id = ticket_id
+                    break
+        
+        # Если есть активный тикет и он не ожидает оператора, продолжаем диалог
+        if active_ticket_id:
+            ticket_data = self.tickets.get(active_ticket_id)
             
-            if not ticket_data or ticket_data['user_id'] != user_id:
-                await update.message.reply_text("❌ Тикет не найден!")
-                del context.user_data['user_replying_to']
-                return
-            
-            if ticket_data['status'] != 'open':
-                await update.message.reply_text("❌ Этот тикет уже закрыт!")
-                del context.user_data['user_replying_to']
-                return
-            
-            # Добавляем сообщение в историю
-            if 'messages' not in ticket_data:
-                ticket_data['messages'] = []
-            
-            ticket_data['messages'].append({
-                'text': update.message.text,
-                'from_user': True,
-                'timestamp': datetime.now().isoformat()
-            })
-            ticket_data['last_activity'] = datetime.now().isoformat()
-            self.save_data()
-            
-            # Проверяем, ожидает ли тикет оператора
+            # Если тикет ожидает оператора, отправляем сообщение админу
             if ticket_data.get('waiting_for_operator', False):
+                # Добавляем сообщение в историю
+                ticket_data['messages'].append({
+                    'text': user_message,
+                    'from_user': True,
+                    'timestamp': datetime.now().isoformat()
+                })
+                ticket_data['last_activity'] = datetime.now().isoformat()
+                self.save_data()
+                
                 # Отправляем админу
                 try:
                     keyboard = [
-                        [InlineKeyboardButton("💬 Ответить", callback_data=f"admin_reply_{ticket_id}")],
-                        [InlineKeyboardButton("👀 Посмотреть тикет", callback_data=f"admin_view_{ticket_id}")]
+                        [InlineKeyboardButton("💬 Ответить", callback_data=f"admin_reply_{active_ticket_id}")],
+                        [InlineKeyboardButton("👀 Посмотреть тикет", callback_data=f"admin_view_{active_ticket_id}")]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     
                     await context.bot.send_message(
                         chat_id=ADMIN_ID,
-                        text=f"📞 <b>Ответ пользователя по тикету {ticket_id}</b>\n\n"
+                        text=f"📞 <b>Ответ пользователя по тикету {active_ticket_id}</b>\n\n"
                              f"👤 Пользователь: {ticket_data['user_full_name']}\n"
-                             f"📝 Сообщение: {html.escape(update.message.text)}",
+                             f"📝 Сообщение: {html.escape(user_message)}",
                         parse_mode='HTML',
                         reply_markup=reply_markup
                     )
@@ -1414,178 +1408,186 @@ class SupportBot:
                     logger.error(f"Не удалось отправить сообщение админу: {e}")
                 
                 await update.message.reply_text("✅ Ваш ответ отправлен оператору!")
-                
-            else:
-                # Обрабатываем через AI
-                ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, update.message.text)
-                
-                if problem_solved:
-                    # Проблема решена - закрываем тикет
-                    ticket_data['status'] = 'closed'
-                    if ticket_id in self.open_tickets:
-                        self.open_tickets.remove(ticket_id)
-                    self.save_data()
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
-                        [InlineKeyboardButton("🎫 Новый тикет", callback_data="create_ticket")],
-                        [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await update.message.reply_text(
-                        f"✅ <b>Проблема решена!</b>\n\n"
-                        f"Тикет <code>{ticket_id}</code> закрыт.\n\n"
-                        f"<i>Спасибо за использование нашего сервиса!</i>",
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    
-                    # Уведомляем админа
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=f"✅ <b>Тикет закрыт AI</b>\n\nТикет <code>{ticket_id}</code>\nПользователь подтвердил решение проблемы.",
-                            parse_mode='HTML'
-                        )
-                    except Exception as e:
-                        logger.error(f"Не удалось уведомить админа: {e}")
-                    
-                    del context.user_data['user_replying_to']
-                    return
-                
-                if wants_operator:
-                    # Пользователь попросил оператора
-                    ticket_data['waiting_for_operator'] = True
-                    ticket_data['ai_processed'] = False
-                    self.save_data()
-                    
-                    await self.notify_admin_about_ticket(ticket_id)
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-                        [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
-                        [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await update.message.reply_text(
-                        f"📞 <b>Оператор вызван!</b>\n\n"
-                        f"Ваш запрос передан оператору поддержки.\n"
-                        f"Ожидайте ответа в ближайшее время.",
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    
-                    del context.user_data['user_replying_to']
-                    return
-                
-                if ai_response:
-                    # Сохраняем ответ AI
-                    ticket_data['messages'].append({
-                        'text': ai_response,
-                        'from_user': False,
-                        'timestamp': datetime.now().isoformat(),
-                        'is_ai': True
-                    })
-                    ticket_data['last_activity'] = datetime.now().isoformat()
-                    self.save_data()
-                    
-                    # Отправляем ответ пользователю
-                    keyboard = [
-                        [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-                        [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")],
-                        [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await update.message.reply_text(
-                        f"🤖 <b>AI-помощник:</b>\n\n{html.escape(ai_response)}",
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                else:
-                    # Если AI не ответил, вызываем оператора
-                    ticket_data['waiting_for_operator'] = True
-                    ticket_data['ai_processed'] = False
-                    self.save_data()
-                    
-                    await self.notify_admin_about_ticket(ticket_id)
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-                        [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
-                        [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await update.message.reply_text(
-                        f"⏳ <b>ИИ временно недоступен</b>\n\n"
-                        f"Мы передали ваш запрос оператору.\n"
-                        f"Ожидайте ответа в ближайшее время!",
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-            
-            del context.user_data['user_replying_to']
-            
-        # Обычное сообщение пользователя
-        else:
-            # Базовая проверка на спам
-            spam_attempts = self.user_spam_attempts.get(user_id, 0)
-            
-            if spam_attempts > 5:
-                await update.message.reply_text(
-                    "❌ Слишком много сообщений. Пожалуйста, создайте тикет для обращения в поддержку.",
-                    parse_mode='HTML'
-                )
                 return
             
-            if len(update.message.text.strip()) < 3:
-                self.user_spam_attempts[user_id] = spam_attempts + 1
-                self.save_data()
-                await update.message.reply_text(
-                    "❌ Сообщение слишком короткое.",
-                    parse_mode='HTML'
-                )
-                return
+            # Иначе продолжаем с AI
+            ticket_id = active_ticket_id
             
-            # Проверка на явный спам
-            if self.is_clearly_spam(update.message.text):
-                self.user_spam_attempts[user_id] = spam_attempts + 1
-                self.save_data()
-                await update.message.reply_text(
-                    "❌ Ваше сообщение содержит недопустимый контент.",
-                    parse_mode='HTML'
-                )
-                return
-            
-            # Проверка на бессмысленный текст
-            if self.is_gibberish(update.message.text):
-                self.user_spam_attempts[user_id] = spam_attempts + 1
-                self.save_data()
-                await update.message.reply_text(
-                    "❌ Сообщение содержит бессмысленный текст.",
-                    parse_mode='HTML'
-                )
-                return
-            
-            # Сбрасываем счетчик при нормальном сообщении
-            self.user_spam_attempts[user_id] = 0
+            # Добавляем сообщение в историю
+            ticket_data['messages'].append({
+                'text': user_message,
+                'from_user': True,
+                'timestamp': datetime.now().isoformat()
+            })
+            ticket_data['last_activity'] = datetime.now().isoformat()
             self.save_data()
             
-            keyboard = [
-                [InlineKeyboardButton("🎫 Создать тикет", callback_data="create_ticket")],
-                [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
-                [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            # Обрабатываем через AI
+            ai_response, wants_operator, needs_clarification, problem_solved = await self.ask_ai_for_help(ticket_id, user_message)
             
+            if problem_solved:
+                # Проблема решена - закрываем тикет
+                await self.close_ticket(None, ticket_id, closed_by_ai=True)
+                
+                keyboard = [
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+                    [InlineKeyboardButton("🎫 Новый тикет", callback_data="create_ticket")],
+                    [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"✅ <b>Проблема решена!</b>\n\n"
+                    f"Тикет <code>{ticket_id}</code> закрыт.\n\n"
+                    f"<i>Спасибо за использование нашего сервиса!</i>",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                
+                # Уведомляем админа
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"✅ <b>Тикет закрыт AI</b>\n\nТикет <code>{ticket_id}</code>\nПользователь подтвердил решение проблемы.",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить админа: {e}")
+                return
+            
+            if wants_operator:
+                # Пользователь попросил оператора
+                ticket_data['waiting_for_operator'] = True
+                ticket_data['ai_processed'] = False
+                self.save_data()
+                
+                await self.notify_admin_about_ticket(ticket_id)
+                
+                keyboard = [
+                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+                    [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"📞 <b>Оператор вызван!</b>\n\n"
+                    f"Ваш запрос передан оператору поддержки.\n"
+                    f"Ожидайте ответа в ближайшее время.",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
+            
+            if ai_response:
+                # Сохраняем ответ AI
+                ticket_data['messages'].append({
+                    'text': ai_response,
+                    'from_user': False,
+                    'timestamp': datetime.now().isoformat(),
+                    'is_ai': True
+                })
+                ticket_data['ai_response_count'] = ticket_data.get('ai_response_count', 0) + 1
+                ticket_data['last_activity'] = datetime.now().isoformat()
+                self.save_data()
+                
+                # Отправляем ответ пользователю
+                keyboard = [
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+                    [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+                ]
+                
+                # Добавляем кнопку вызова оператора только если было 2+ ответов AI
+                if ticket_data['ai_response_count'] >= 2:
+                    keyboard.insert(0, [InlineKeyboardButton("📞 Позвать оператора", callback_data=f"user_call_operator_{ticket_id}")])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"🤖 <b>AI-помощник:</b>\n\n{html.escape(ai_response)}",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            else:
+                # Если AI не ответил, вызываем оператора
+                ticket_data['waiting_for_operator'] = True
+                ticket_data['ai_processed'] = False
+                self.save_data()
+                
+                await self.notify_admin_about_ticket(ticket_id)
+                
+                keyboard = [
+                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+                    [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    f"⏳ <b>ИИ временно недоступен</b>\n\n"
+                    f"Мы передали ваш запрос оператору.\n"
+                    f"Ожидайте ответа в ближайшее время!",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            return
+        
+        # Если нет активного тикета, предлагаем создать
+        # Базовая проверка на спам
+        spam_attempts = self.user_spam_attempts.get(user_id, 0)
+        
+        if spam_attempts > 5:
             await update.message.reply_text(
-                "💬 <b>Ваше сообщение получено!</b>\n\nДля обращения в поддержку создайте тикет:",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+                "❌ Слишком много сообщений. Пожалуйста, создайте тикет для обращения в поддержку.",
+                parse_mode='HTML'
             )
+            return
+        
+        if len(user_message.strip()) < 3:
+            self.user_spam_attempts[user_id] = spam_attempts + 1
+            self.save_data()
+            await update.message.reply_text(
+                "❌ Сообщение слишком короткое.",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Проверка на явный спам
+        if self.is_clearly_spam(user_message):
+            self.user_spam_attempts[user_id] = spam_attempts + 1
+            self.save_data()
+            await update.message.reply_text(
+                "❌ Ваше сообщение содержит недопустимый контент.",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Проверка на бессмысленный текст
+        if self.is_gibberish(user_message):
+            self.user_spam_attempts[user_id] = spam_attempts + 1
+            self.save_data()
+            await update.message.reply_text(
+                "❌ Сообщение содержит бессмысленный текст.",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Сбрасываем счетчик при нормальном сообщении
+        self.user_spam_attempts[user_id] = 0
+        self.save_data()
+        
+        keyboard = [
+            [InlineKeyboardButton("🎫 Создать тикет", callback_data="create_ticket")],
+            [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+            [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💬 <b>Ваше сообщение получено!</b>\n\nДля обращения в поддержку создайте тикет:",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
 
     async def handle_admin_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает сообщения от администратора"""
@@ -1620,8 +1622,8 @@ class SupportBot:
             # Отправляем сообщение пользователю
             try:
                 keyboard = [
-                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")]
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")],
+                    [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -1667,7 +1669,7 @@ class SupportBot:
         """Запускает задачи для очистки"""
         # Запускаем проверку неактивных диалогов
         asyncio.create_task(self.check_inactive_ai_conversations())
-        logger.info("Запущена задача проверки неактивных диалогов")
+        logger.info("Запущена задача проверки неактивных диалогов (24 часа)")
 
     def run(self):
         logger.info("Бот запущен!")
