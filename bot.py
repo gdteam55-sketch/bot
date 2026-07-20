@@ -130,8 +130,17 @@ class SupportBot:
         # Обработчики callback
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
         
-        # Обработчик сообщений
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        # Обработчик сообщений - ДОБАВЛЯЕМ ФИЛЬТР, ЧТОБЫ ИГНОРИРОВАТЬ АДМИНА
+        self.app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.User(user_id=ADMIN_ID), 
+            self.handle_user_message
+        ))
+        
+        # Обработчик для сообщений от админа (отдельный)
+        self.app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_ID),
+            self.handle_admin_message
+        ))
         
         # Обработчик для автоматического /start
         self.app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.welcome_new_user))
@@ -240,7 +249,7 @@ class SupportBot:
         """
         ticket_data = self.tickets.get(ticket_id)
         if not ticket_data:
-            return None, False, False
+            return None, False, False, False
         
         try:
             # Формируем контекст для ИИ
@@ -1352,62 +1361,12 @@ class SupportBot:
             except Exception as e:
                 logger.error(f"Ошибка в проверке неактивных диалогов: {e}")
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_user_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает сообщения от обычных пользователей (не админа)"""
         user_id = update.effective_user.id
         
-        # Если админ отвечает на тикет
-        if user_id == ADMIN_ID and 'admin_replying_to' in context.user_data:
-            ticket_id = context.user_data['admin_replying_to']
-            ticket_data = self.tickets.get(ticket_id)
-            
-            if not ticket_data:
-                await update.message.reply_text("❌ Тикет не найден!")
-                del context.user_data['admin_replying_to']
-                return
-            
-            # Добавляем сообщение в историю
-            if 'messages' not in ticket_data:
-                ticket_data['messages'] = []
-            
-            ticket_data['messages'].append({
-                'text': update.message.text,
-                'from_user': False,
-                'timestamp': datetime.now().isoformat()
-            })
-            ticket_data['last_activity'] = datetime.now().isoformat()
-            self.save_data()
-            
-            # Отправляем сообщение пользователю
-            try:
-                keyboard = [
-                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
-                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await context.bot.send_message(
-                    chat_id=ticket_data['user_id'],
-                    text=f"👨‍💼 <b>Ответ поддержки:</b>\n\n{html.escape(update.message.text)}",
-                    parse_mode='HTML',
-                    reply_markup=reply_markup
-                )
-            except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю: {e}")
-                await update.message.reply_text("❌ Не удалось отправить сообщение пользователю.")
-            
-            del context.user_data['admin_replying_to']
-            
-            # Показываем кнопки админу после ответа
-            keyboard = [
-                [InlineKeyboardButton("📊 Панель админа", callback_data="admin_panel")],
-                [InlineKeyboardButton("👀 Посмотреть тикет", callback_data=f"admin_view_{ticket_id}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text("✅ Ответ отправлен пользователю!", reply_markup=reply_markup)
-            
         # Если пользователь отвечает на тикет
-        elif 'user_replying_to' in context.user_data:
+        if 'user_replying_to' in context.user_data:
             ticket_id = context.user_data['user_replying_to']
             ticket_data = self.tickets.get(ticket_id)
             
@@ -1571,7 +1530,7 @@ class SupportBot:
             del context.user_data['user_replying_to']
             
         # Обычное сообщение пользователя
-        elif user_id != ADMIN_ID:
+        else:
             # Базовая проверка на спам
             spam_attempts = self.user_spam_attempts.get(user_id, 0)
             
@@ -1624,6 +1583,82 @@ class SupportBot:
             
             await update.message.reply_text(
                 "💬 <b>Ваше сообщение получено!</b>\n\nДля обращения в поддержку создайте тикет:",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+
+    async def handle_admin_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает сообщения от администратора"""
+        user_id = update.effective_user.id
+        
+        # Проверяем, что это действительно админ
+        if user_id != ADMIN_ID:
+            return
+        
+        # Если админ отвечает на тикет
+        if 'admin_replying_to' in context.user_data:
+            ticket_id = context.user_data['admin_replying_to']
+            ticket_data = self.tickets.get(ticket_id)
+            
+            if not ticket_data:
+                await update.message.reply_text("❌ Тикет не найден!")
+                del context.user_data['admin_replying_to']
+                return
+            
+            # Добавляем сообщение в историю
+            if 'messages' not in ticket_data:
+                ticket_data['messages'] = []
+            
+            ticket_data['messages'].append({
+                'text': update.message.text,
+                'from_user': False,
+                'timestamp': datetime.now().isoformat()
+            })
+            ticket_data['last_activity'] = datetime.now().isoformat()
+            self.save_data()
+            
+            # Отправляем сообщение пользователю
+            try:
+                keyboard = [
+                    [InlineKeyboardButton("💬 Ответить", callback_data=f"user_reply_{ticket_id}")],
+                    [InlineKeyboardButton("📋 Мои тикеты", callback_data="my_tickets")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await context.bot.send_message(
+                    chat_id=ticket_data['user_id'],
+                    text=f"👨‍💼 <b>Ответ поддержки:</b>\n\n{html.escape(update.message.text)}",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.error(f"Не удалось отправить сообщение пользователю: {e}")
+                await update.message.reply_text("❌ Не удалось отправить сообщение пользователю.")
+            
+            del context.user_data['admin_replying_to']
+            
+            # Показываем кнопки админу после ответа
+            keyboard = [
+                [InlineKeyboardButton("📊 Панель админа", callback_data="admin_panel")],
+                [InlineKeyboardButton("👀 Посмотреть тикет", callback_data=f"admin_view_{ticket_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text("✅ Ответ отправлен пользователю!", reply_markup=reply_markup)
+        
+        else:
+            # Если админ просто пишет в бота без активного ответа на тикет
+            keyboard = [
+                [InlineKeyboardButton("👨‍💼 Панель админа", callback_data="admin_panel")],
+                [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+                [InlineKeyboardButton("🔙 На главную", callback_data="back_to_start")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "👨‍💼 <b>Администратор</b>\n\n"
+                "Вы находитесь в режиме администратора.\n"
+                "Используйте панель администратора для работы с тикетами.",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
