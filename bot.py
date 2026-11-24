@@ -4,8 +4,8 @@ import urllib.error
 import urllib.request
 
 # ======== НАСТРОЙКИ ========
-TELEGRAM_TOKEN = "123456:ABC..."     # токен от @BotFather
-DEEPSEEK_KEY = "sk-..."              # ключ с platform.deepseek.com
+TELEGRAM_TOKEN = "9068326594:AAHmjMGmUJj7vDylEDunPb0ip0YtCho6G2Y"     # токен от @BotFather
+DEEPSEEK_KEY = "sk-3b75aa5df3fd414b99e4fe9c2e2b60b8"              # ключ с platform.deepseek.com
 ALLOWED_CHAT_ID = 0                  # твой chat id (0 = отвечать всем, см. ниже как узнать)
 MODEL = "deepseek-chat"              # "deepseek-reasoner" думает дольше, но точнее в математике
 SYSTEM = ("Отвечай максимально коротко: только итог без пояснений. НО если просят развернуто пиши с решениями "
