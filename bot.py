@@ -1,4 +1,12 @@
+#!/usr/bin/env python3
+"""
+Telegram-бот: пишешь вопрос, получаешь ответ от DeepSeek.
+Только стандартная библиотека Python 3.8+, ничего устанавливать не нужно.
+
+Запуск:  python bot.py
+"""
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -8,9 +16,10 @@ TELEGRAM_TOKEN = "9068326594:AAHmjMGmUJj7vDylEDunPb0ip0YtCho6G2Y"     # токе
 DEEPSEEK_KEY = "sk-3b75aa5df3fd414b99e4fe9c2e2b60b8"              # ключ с platform.deepseek.com
 ALLOWED_CHAT_ID = 0                  # твой chat id (0 = отвечать всем, см. ниже как узнать)
 MODEL = "deepseek-chat"              # "deepseek-reasoner" думает дольше, но точнее в математике
-SYSTEM = ("Отвечай максимально коротко: только итог без пояснений. НО если просят развернуто пиши с решениями "
-          "Для заданий с несколькими пунктами: по строке на пункт, например «1) 12». 2) 11 "
-          "Отвечай на языке вопроса.")
+SYSTEM = ("Отвечай максимально коротко: только итог без пояснений. НО если просят развернуто пиши с решениями. "
+          "Для заданий с несколькими пунктами: по строке на пункт, например «1) 12» «2) 11». "
+          "Отвечай на языке вопроса. "
+          "Пиши обычным текстом, без LaTeX и markdown.")
 # ===========================
 
 
@@ -38,6 +47,21 @@ def send(chat_id, text):
         tg("sendMessage", chat_id=chat_id, text=text[i:i + 4000])
 
 
+def clean(text):
+    """Страховка: если модель всё же выдала LaTeX или markdown, превращаем в обычный текст."""
+    text = re.sub(r"\\\(|\\\)|\\\[|\\\]|\$\$|\$", "", text)
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", text)
+    text = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", text)
+    for tex, plain in (("\\cdot", "·"), ("\\times", "×"), ("\\approx", "≈"),
+                       ("\\leq", "≤"), ("\\geq", "≥"), ("\\le", "≤"), ("\\ge", "≥"),
+                       ("\\pi", "π"), ("\\,", " "), ("\\ ", " ")):
+        text = text.replace(tex, plain)
+    text = re.sub(r"\*\*|__|`", "", text)
+    text = text.replace("{", "").replace("}", "")
+    return text.strip()
+
+
 def ask_deepseek(question):
     data = post_json(
         "https://api.deepseek.com/chat/completions",
@@ -52,7 +76,7 @@ def ask_deepseek(question):
         headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
         timeout=180,
     )
-    return data["choices"][0]["message"]["content"].strip()
+    return clean(data["choices"][0]["message"]["content"])
 
 
 def main():
