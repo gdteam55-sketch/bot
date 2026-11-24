@@ -15,7 +15,8 @@ import urllib.request
 TELEGRAM_TOKEN = "9068326594:AAHmjMGmUJj7vDylEDunPb0ip0YtCho6G2Y"     # токен от @BotFather
 DEEPSEEK_KEY = "sk-3b75aa5df3fd414b99e4fe9c2e2b60b8"              # ключ с platform.deepseek.com
 ALLOWED_CHAT_ID = 0                  # твой chat id (0 = отвечать всем, см. ниже как узнать)
-MODEL = "deepseek-chat"              # "deepseek-reasoner" думает дольше, но точнее в математике
+MAX_HISTORY = 12                     # сколько последних сообщений помнить (6 вопросов и 6 ответов)
+MODEL = "deepseek-chat"             # "deepseek-reasoner" думает дольше, но точнее в математике
 SYSTEM = ("Отвечай максимально коротко: только итог без пояснений. НО если просят развернуто пиши с решениями. "
           "Для заданий с несколькими пунктами: по строке на пункт, например «1) 12» «2) 11». "
           "Отвечай на языке вопроса. "
@@ -62,21 +63,24 @@ def clean(text):
     return text.strip()
 
 
-def ask_deepseek(question):
+HISTORY = {}  # chat_id -> список последних сообщений (живёт, пока бот запущен)
+
+
+def ask_deepseek(chat_id, question):
+    history = HISTORY.setdefault(chat_id, [])
+    messages = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": question}]
     data = post_json(
         "https://api.deepseek.com/chat/completions",
-        {
-            "model": MODEL,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": question},
-            ],
-        },
+        {"model": MODEL, "stream": False, "messages": messages},
         headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
         timeout=180,
     )
-    return clean(data["choices"][0]["message"]["content"])
+    answer = clean(data["choices"][0]["message"]["content"])
+    # запоминаем вопрос и ответ только после успешного ответа
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": answer})
+    del history[:-MAX_HISTORY]
+    return answer
 
 
 def main():
@@ -106,12 +110,16 @@ def main():
                 continue  # чужим не отвечаем, чтобы не тратили твой баланс
 
             if text == "/start":
-                send(chat_id, "Пиши вопрос, отвечу.")
+                send(chat_id, "Пиши вопрос, отвечу. /clear: забыть разговор.")
+                continue
+            if text == "/clear":
+                HISTORY.pop(chat_id, None)
+                send(chat_id, "Забыл.")
                 continue
 
             try:
                 tg("sendChatAction", chat_id=chat_id, action="typing")
-                send(chat_id, ask_deepseek(text))
+                send(chat_id, ask_deepseek(chat_id, text))
             except Exception as e:
                 print("Ошибка:", e)
                 send(chat_id, f"Ошибка: {str(e)[:300]}")
